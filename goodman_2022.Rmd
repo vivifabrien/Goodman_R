@@ -1,0 +1,453 @@
+---
+title: "Goodman 2022"
+author: "Vivien Fabry"
+date: '2022-05-16'
+output: html_document
+---
+# Load Packages
+```{r}
+pacman::p_load(haven,tidyverse,ggplot2,ggpubr,performance,eiPack,eiCompare, readxl, stargazer)
+```
+
+
+# Load Data
+
+```{r}
+# Read in Excel files
+gm2022 <- read_excel("2022 results.xlsx", skip = 1)
+gm2022_sup <- read_excel("2022 05.04 supplement.xlsx") 
+
+```
+
+# Combine Excel Sheets
+
+```{r}
+# Combine through wijk code
+
+gm2022_sup <- gm2022_sup %>%  rename(buurtcode = gebiedcode15)
+gm2022_jaar <- gm2022_sup %>% filter(jaar == 2022)
+gm2022_join <- gm2022 %>%  left_join(gm2022_jaar)
+
+```
+
+# Merge
+
+```{r}
+
+# ID
+gm2022_join$id <- seq_along(gm2022_join[[1]])
+
+keep_vars <- c("id", "stembureau", "wijkcode","buurtcode", "gebiednaam", "postcode",
+               "opgeroepenen", "BEVTURK_P", "BEVSUR_P", "BEVMAROK_P", "BEV65PLUS",
+               "geldige stembiljetten", "blanco stembiljetten", 
+               "ongeldige stembiljetten", "BEVTOTAAL", "BEVSUR", "BEVANTIL",
+               "BEVTURK", "BEVMAROK", "BEVOVNW", "BEVWEST", "BEVAUTOCH",
+               "BEVNW")
+
+goodman<- gm2022_join[, keep_vars]
+
+# Test for neighborhoods with no eligible voters
+test_nopop <- subset(goodman, opgeroepenen == 0)
+
+#deleting variables with no information on the number of elibigle voters
+# and no population
+
+goodman_turnout <- goodman %>%  dplyr::filter(!opgeroepenen== 0|!is.na(opgeroepenen)) %>% dplyr::filter(! BEVTOTAAL == 0|!is.na(BEVTOTAAL)) # 487 observations for 24 variables
+
+distinct(goodman_turnout, buurtcode) #280 rows
+
+#Test for NAs
+
+test_na <- subset(goodman, !complete.cases(goodman))
+
+# Main problem: no data one ethnic composition of buurt population
+# Source of problem: probably due to lack of data on buurt code, so that when the original dataset 
+# was merged with ethnic data those three cases did not get any data on population characteristics.
+
+# Save ids from the observations without populations
+nopop_ids <- test_nopop$id
+
+
+
+```
+
+```{r}
+# Opkomstpercentage
+
+goodman <- goodman_turnout %>% 
+  rename(geldige = "geldige stembiljetten", 
+         blanco = "blanco stembiljetten",  
+         ongeldig = "ongeldige stembiljetten") %>% 
+  mutate(opkomstpercentage = round(((geldige + blanco +ongeldig)/opgeroepenen),2))
+```
+
+
+## Buurt
+
+```{r}
+# We're now ready to aggregate to the buurt level
+
+# We want a dataframe with the buurt code (Which includes the wijk and stadsdeel codes),
+# the sum of the voting variables, and the value of the ethnic composition variables.
+# The latter are already measured at the neighbourhood level, so we do this in two steps
+
+#1 Aggregate voting variables
+
+# First we subset the buurt code and the voting variables, then aggregate to buurt
+
+piece_1 <- goodman %>% 
+  filter(!stembureau == "Totaal") %>% 
+  subset(select = c("buurtcode","opgeroepenen","geldige",
+                                      "blanco","ongeldig", "opkomstpercentage")) %>%
+  # Filter out total number
+  group_by(buurtcode) %>% 
+  dplyr::summarize(opgeroe = sum(opgeroepenen),
+                   # Turnout per polling station summed together
+                   turnout = (sum(geldige+ongeldig+blanco)/ sum(opgeroepenen))*100,
+                   geldige = sum(geldige),
+                   blanco = sum(blanco),
+                   ongeldig = sum(ongeldig)) %>% 
+  ungroup()
+
+# Then we do the same with ethnic pop but without adding the values
+# As the composition is constant per buurt, we can take the mean (or median) to extract the value
+
+piece_2 <- subset(goodman, select = c("buurtcode",  "BEVSUR", "BEVANTIL",
+               "BEVTURK", "BEVMAROK", "BEVOVNW", "BEVWEST", "BEVAUTOCH",
+               "BEVNW","BEVTOTAAL", "BEVSUR_P", "BEVTURK_P","BEVMAROK_P"))
+
+piece_2 <- piece_2 %>% group_by(buurtcode) %>% dplyr::summarize(
+  bevolking = mean(BEVTOTAAL),
+  Tur = mean(BEVTURK_P),
+  Sur = mean(BEVSUR_P),
+  Mar = mean(BEVMAROK_P),
+  bevsur = mean(BEVSUR),
+  bevantil = mean(BEVANTIL),
+  bevturk = mean(BEVTURK),
+  bevmarok = mean(BEVMAROK),
+  bevovnW = mean(BEVOVNW),
+  bevwest = mean(BEVWEST),
+  bevautoch = mean(BEVAUTOCH),
+  bevnw = mean(BEVNW)) %>% 
+  ungroup()
+
+# Lastly merge them
+
+goodman_merge <- merge(piece_1, piece_2, by = "buurtcode")
+summary(goodman_merge) # Check
+
+# Throw out observation whith obgeroe 0 (that should not be there)
+goodman_buurt <- goodman_merge %>% filter(!buurtcode == "K45a")
+```
+
+
+# Additional Variables - Clean this up
+
+
+```{r}
+
+### Additional variables needed for calculation
+## Calculate non-immigrant population
+# Percentage
+goodman_fin <- goodman_buurt %>%  
+  mutate_at(vars(Turp = Tur,
+                 Surp = Sur,
+                 Marp = Mar),
+            ~.x/100)%>%
+  mutate_at(vars(nonTurp = Turp,
+                 nonSurp = Surp,
+                 nonMarp = Marp),
+            ~1-.x) %>% 
+  mutate(turnoutp = turnout/100) %>%
+  # capped turnout
+  mutate(turnout_cap = ifelse(turnoutp > 1,1,turnoutp)) %>% 
+  mutate(rest = 1-turnoutp) %>%
+  mutate(rest_cap = 1-turnout_cap) %>% 
+  
+# Absolute numbers
+  mutate_at(vars(nonTur = bevturk,
+                 nonSur = bevsur,
+                 nonMar = bevmarok),
+            ~bevolking-.x) %>%
+  
+  # Calculate people who didn't vote (bevolking - geldige)
+  # Here I use bevolking - geldige to get the number of people who didn't vote from the bevolking
+  # I need to use bevolking because the immigrant precentages are only for the population as well
+  # Problem: People can go vote outside their buurt
+  mutate(nonVo = bevolking - (geldige+blanco+ongeldig),
+         voted = geldige+blanco+ongeldig)
+
+
+```
+
+## Weights (work in progress)
+
+```{r}
+goodman_fin <- goodman_fin %>% 
+  mutate(weight = bevolking/sum(bevolking)) %>% 
+  mutate_at(
+    vars(turnoutp_w = turnoutp, 
+         BevTur_w = bevturk, 
+         BevSur_w = bevsur, 
+         BevMar_w = bevmarok,
+    ), ~.x*weight
+  )
+```
+
+
+
+# Ecological Regression
+## Tur
+
+```{r}
+
+### Goodman buurt
+## EI Test
+# This uses bevolking as total count, since this is calculated with absolute Numbers 
+#and the immigrant proportions are only available for population not
+# EIpack needs the rows and columns to add up to the same number
+
+
+
+# Percentage
+
+out_per <- bounds(cbind(turnoutp,rest) ~ cbind(Turp,nonTurp), data = goodman_fin,rows = "Turp",
+              column = "turnoutp",
+              threshold = 0.10, total = "opgeroe")
+reg_per <- ei.reg(cbind(turnoutp,rest) ~ cbind(Turp,nonTurp), data = goodman_fin)
+summary(reg_per)
+reg_per_bayes <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Turp,nonTurp), data = goodman_fin)
+summary(reg_per_bayes)
+
+lreg_per <- lambda.reg(reg_per,
+                   columns = c("turnoutp","rest"))
+lreg_per_bayes <- lambda.reg.bayes(reg_per_bayes,
+                       columns = c("turnoutp","rest"))
+plot.bounds(out_per, row = "Turp",column = "turnoutp")
+densityplot(lreg_per) 
+densityplot(lreg_per_bayes) 
+
+
+# Trying ecological regression with Bayes
+distinct(goodman_fin, buurtcode) #263 rows
+
+reg_bayes <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Turp,nonTurp), goodman_fin, sample = 263, weights = NULL, truncate=FALSE) 
+
+
+# Turnout capped at 1
+
+out_cap <- bounds(cbind(turnout_cap,rest_cap) ~ cbind(Turp,nonTurp), data = goodman_fin,rows = "Turp",
+                  column = "turnout_cap",
+                  threshold = 0.10, total = "opgeroe")
+reg_cap <- ei.reg(cbind(turnout_cap,rest_cap) ~ cbind(Turp,nonTurp), data = goodman_fin)
+summary(reg_cap)
+summary(out_cap)
+
+
+lreg_cap <- lambda.reg(reg_cap,
+                       columns = c("turnout_cap","rest_cap"))
+
+plot.bounds(out_cap, row = "Turp",column = "turnout_cap")
+densityplot(lreg_cap) 
+
+summary(goodman_fin$rest_cap)
+
+# Monte carlo
+reg_cap_bayes <- ei.reg.bayes(cbind(turnout_cap,rest_cap) ~ cbind(Turp,nonTurp), data = goodman_fin)
+summary(reg_cap_bayes)
+
+
+
+# How to get the number per neighborhood? Maybe we need to to an ecoreg per neighborhood individually
+# The function only gives matrices of the summed proportions
+# Bounds will not help for proportions since they are either 0 or 1 
+```
+
+## Mar
+
+```{r}
+
+
+# Percentage
+
+out_per2 <- bounds(cbind(turnoutp,rest) ~ cbind(Marp,nonMarp), data = goodman_fin,rows = "Marp",
+              column = "turnoutp",
+              threshold = 0.10, total = "opgeroe")
+reg_per2 <- ei.reg(cbind(turnoutp,rest) ~ cbind(Marp,nonMarp), data = goodman_fin)
+summary(reg_per2)
+reg_per_bayes2 <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Marp,nonMarp), data = goodman_fin)
+summary(reg_per_bayes2)
+
+lreg_per2 <- lambda.reg(reg_per,
+                   columns = c("turnoutp","rest"))
+lreg_per_bayes2 <- lambda.reg.bayes(reg_per_bayes2,
+                       columns = c("turnoutp","rest"))
+plot.bounds(out_per2, row = "Marp",column = "turnoutp")
+densityplot(lreg_per2) 
+densityplot(lreg_per_bayes2) 
+
+
+reg_bayes2 <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Marp,nonMarp), goodman_fin, sample = 263, weights = NULL, truncate=FALSE) 
+
+
+
+# Turnout capped at 1 - does not change much
+
+out_cap2 <- bounds(cbind(turnout_cap,rest_cap) ~ cbind(Marp,nonMarp), data = goodman_fin,rows = "Marp",
+                  column = "turnout_cap",
+                  threshold = 0.10, total = "opgeroe")
+reg_cap2 <- ei.reg(cbind(turnout_cap,rest_cap) ~ cbind(Marp,nonMarp), data = goodman_fin)
+summary(reg_cap2)
+summary(out_cap2)
+
+
+lreg_cap2 <- lambda.reg(reg_cap2,
+                       columns = c("turnout_cap","rest_cap"))
+
+plot.bounds(out_cap2, row = "Marp",column = "turnout_cap")
+densityplot(lreg_cap2) 
+
+summary(goodman_fin$rest_cap)
+
+# Monte carlo
+reg_cap_bayes2 <- ei.reg.bayes(cbind(turnout_cap,rest_cap) ~ cbind(Marp,nonMarp), data = goodman_fin)
+summary(reg_cap_bayes2)
+
+```
+
+
+## Sur
+
+```{r}
+
+
+# Percentage
+
+out_per3 <- bounds(cbind(turnoutp,rest) ~ cbind(Surp,nonSurp), data = goodman_fin,rows = "Surp",
+              column = "turnoutp",
+              threshold = 0.10, total = "opgeroe")
+reg_per3 <- ei.reg(cbind(turnoutp,rest) ~ cbind(Surp,nonSurp), data = goodman_fin)
+summary(reg_per3)
+reg_per_bayes3 <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Surp,nonSurp), data = goodman_fin)
+summary(reg_per_bayes3)
+
+lreg_per3 <- lambda.reg(reg_per,
+                   columns = c("turnoutp","rest"))
+lreg_per_bayes3 <- lambda.reg.bayes(reg_per_bayes3,
+                       columns = c("turnoutp","rest"))
+plot.bounds(out_per3, row = "Surp",column = "turnoutp")
+densityplot(lreg_per3) 
+densityplot(lreg_per_bayes3) 
+
+
+reg_bayes3 <- ei.reg.bayes(cbind(turnoutp,rest) ~ cbind(Surp,nonSurp), goodman_fin, sample = 263, weights = NULL, truncate=FALSE) 
+
+
+
+# Turnout capped at 1 - does not change much
+
+out_cap3 <- bounds(cbind(turnout_cap,rest_cap) ~ cbind(Surp,nonSurp), data = goodman_fin,rows = "Surp",
+                  column = "turnout_cap",
+                  threshold = 0.10, total = "opgeroe")
+reg_cap3 <- ei.reg(cbind(turnout_cap,rest_cap) ~ cbind(Surp,nonSurp), data = goodman_fin)
+summary(reg_cap3)
+summary(out_cap3)
+
+
+lreg_cap3 <- lambda.reg(reg_cap,
+                       columns = c("turnout_cap","rest_cap"))
+
+plot.bounds(out_cap3, row = "Surp",column = "turnout_cap")
+densityplot(lreg_cap3) 
+
+summary(goodman_fin$rest_cap)
+
+# Monte carlo
+reg_cap_bayes3 <- ei.reg.bayes(cbind(turnout_cap,rest_cap) ~ cbind(Surp,nonSurp), data = goodman_fin)
+summary(reg_cap_bayes3)
+
+```
+
+# Graph
+
+## Distribution of Immigrants per Neighborhood
+
+```{r}
+# This prevents ggplot error "invalid graphics state"
+#dev.off()
+
+# Histogram Turkish population in Neighborhoods 
+turgraph <- goodman_fin %>% 
+  ggplot(aes(Tur)) +
+  geom_histogram() +
+  theme_minimal() +
+  ylab("Neighborhoods") +
+  xlab("Percentage of Turkish Immigrants")
+
+
+# Mar
+
+margraph <- goodman_fin %>% 
+  ggplot(aes(Mar)) +
+  geom_histogram() +
+  theme_minimal()+ 
+  ylab("Neighborhoods") +
+  xlab("Percentage of Moroccan Immigrants")
+
+
+# Sur
+surgraph <- goodman_fin %>% 
+  ggplot(aes(Sur)) +
+  geom_histogram() +
+  theme_minimal() +
+  ylab("Neighborhoods") +
+  xlab("Percentage of Surinamese Immigrants")
+
+
+# Most neighborhoods have under 10% of Sur/Mar or Turkish people living in them
+
+
+figure <- ggarrange(turgraph, surgraph, margraph,
+                    labels = c("Turkish Immigrants", "Surinamese Immigrants", "Moroccan Immigrants"),
+                    ncol = 2, nrow = 2)
+figure
+
+ggsave("img/allgroups_2022.png", width = 8, height = 6)
+
+```
+
+## Distribution of opgeroepen
+
+```{r}
+# mean number
+
+mean(goodman_fin$opgeroe)
+
+goodman_fin %>% 
+  ggplot(aes(opgeroe)) +
+  geom_histogram(bins = 75) +
+  theme_minimal() +
+  ylab("Neighborhoods") +
+  xlab("Eligible Voters")
+
+ggsave("img/opgeroe_2022.png", width = 6, height = 4)
+
+
+
+```
+
+
+```{r}
+# Turnout
+
+goodman_fin %>% 
+  ggplot(aes(turnout)) +
+  geom_histogram(bins = 75) +
+  theme_minimal() +
+  ylab("Neighborhoods") +
+  xlab("Turnout (in %)")
+  
+ggsave("img/turnout_2022.png", width = 6, height = 4)  
+
+```
+
